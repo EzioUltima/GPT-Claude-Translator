@@ -1,0 +1,1 @@
+pyinstaller --onefile --noconsole --hidden-import=tiktoken_ext.openai_public --hidden-import=tiktoken_ext --name "GPTranslator" --icon=icon.ico --add-data "icon.ico;." GPTranslator.py
