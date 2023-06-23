@@ -3,3 +3,5 @@ openai
 requests
 tiktoken
 ast
+configparser
+messagebox
