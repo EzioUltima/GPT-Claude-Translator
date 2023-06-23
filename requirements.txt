@@ -5,3 +5,4 @@ tiktoken
 ast
 configparser
 messagebox
+anthropic
