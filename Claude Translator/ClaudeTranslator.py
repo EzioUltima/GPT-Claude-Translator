@@ -10,6 +10,7 @@ import configparser
 import ast
 import queue
 import tiktoken
+import messagebox
 from tkinter import font, Menu
 from tkinter import font
 from tkinter import filedialog
@@ -36,7 +37,7 @@ def check_prompt_file(prompt_logfile):
     except FileNotFoundError:
         prompt_logfile = ""
         save_settings("prompt_logfile", prompt_logfile)
-        prompt_text = "You are an AI translator assistant. You will help translate text and dialogues to English and if provided, use context as a reference. Try to keep the emotions, dialects, and meanings from the original text and convey them in the translation as much as possible. Do not make them sound bland like a robot. Only reply the translation and nothing else. Do not write detailed explanations."
+        prompt_text = "Human: You are an AI translator assistant. You will help translate text and dialogues to English and if provided, use context as a reference. Try to keep the emotions, dialects, and meanings from the original text and convey them in the translation as much as possible. Do not make them sound bland like a robot. Only reply the translation and nothing else. Do not write detailed explanations.\n\nAssistant: I Understand, please give me the text you want to translate."
     return prompt_logfile, prompt_text
     
 def check_log_file(translation_logfile):
@@ -71,9 +72,9 @@ def save_settings(key, value):
     with open('settings.cfg', 'w') as settings_file:
         config.write(settings_file)
 
-def update_display(display, text):
+def update_display(display, text, clear=False):
     display.config(state=tk.NORMAL)
-    if not streaming:
+    if not streaming or clear:
         display.delete(1.0, tk.END)
     display.insert(tk.END, text)
     display.config(state=tk.DISABLED)
@@ -107,15 +108,28 @@ def parse_text(text):
         for line in text.split('\n')
         if line.strip()
     ]
-
+        
+def start_translating():
+    global translate_button, regenerate_button
+    try:
+        translate_button.config(state=tk.DISABLED)
+        regenerate_button.config(state=tk.DISABLED)
+        translate_text(translated_textbox, prompt_textbox, untranslated_textbox, history, streaming)
+        translate_button.config(state=tk.NORMAL)
+        regenerate_button.config(state=tk.NORMAL)
+    except Exception as e:
+        root.after(0, create_error_window, f"{e}")
+        translate_button.config(state=tk.NORMAL)
+        regenerate_button.config(state=tk.NORMAL)
+        return
+    
 def translate_text(transl_textbox, sysprom, rawtext, histories, stream, ask=False):
     global translated_dict, history_table, history
-
+    
     prompt_text = sysprom.get(1.0, tk.END).strip()
     text_to_translate = rawtext.get(1.0, tk.END).strip()
     
-    #stop_sequences = ["\n\nAssistant:", "\n\nHuman:", "\n\nSystem:"]
-    messages = f"\n\nHuman: {prompt_text}"
+    messages = f"\n\n{prompt_text}"
     if dictionary:
         messages += f"\n\nDictionary: {dictionary}"
     if ask:
@@ -127,39 +141,30 @@ def translate_text(transl_textbox, sysprom, rawtext, histories, stream, ask=Fals
     parsed_messages = parse_text(messages)
     prompt_tokens = num_tokens_from_messages(parsed_messages)
     if prompt_tokens > context_size and history:
-        #print(f"Token exceeded:{prompt_tokens} tokens counted. Cutting Histories...\n\n")
         history.pop(0)
         history.pop(0)
         translate_text(transl_textbox, sysprom, rawtext, histories, stream, ask)
         return
-        
+
     c = anthropic.Client(api_key=anth_api_key)
-    lencount = len(messages)
-    #print(f"{messages}\n\n")
-    #print(f"Token Counter:{prompt_tokens} tokens counted\nLen count={lencount}\n")
-        
-    try:
-        response = c.completion_stream(
-            prompt=messages,
-            model=model,
-            max_tokens_to_sample=max_response_length,
-            temperature=temperature,
-            stream=stream,
-            top_k=top_k,
-            top_p=top_p,
-        )
-    except Exception as e:
-        root.after(0, create_error_window, f"{e}")
-        return
+    response = c.completion_stream(
+        prompt=messages,
+        model=model,
+        max_tokens_to_sample=max_response_length,
+        temperature=temperature,
+        stream=stream,
+        top_k=top_k,
+        top_p=top_p,
+    )
     
     wrote = 0
-    transl_textbox.config(state=tk.NORMAL)
-    transl_textbox.delete(1.0, tk.END)
+    update_display(transl_textbox, "", True)
     for data in response:
         data_message = data["completion"][wrote:]
+        if not streaming or wrote == 0:
+            data_message = data_message.strip()
         wrote = len(data["completion"])
-        if data_message:
-            update_display(transl_textbox, data_message)
+        update_display(transl_textbox, data_message)
     translated_text = transl_textbox.get(1.0, tk.END).strip()
         
     translated_dict[text_to_translate] = translated_text
@@ -172,29 +177,18 @@ def translate_text(transl_textbox, sysprom, rawtext, histories, stream, ask=Fals
     if history_window_open and not ask:
         for item in history_table.get_children():
             history_table.delete(item)
-        prev_untranslated_text = ""
-        prev_translated_text = ""
-        for i, item in enumerate(histories):
-            if item["role"] == "Human":
-                untranslated_text = item["content"]
-                if prev_untranslated_text:
-                    history_table.insert("", "end", values=(prev_untranslated_text, prev_translated_text))
-                prev_untranslated_text = untranslated_text
-            else:
-                translated_text = item["content"]
-                prev_translated_text = translated_text 
-        history_table.insert("", "end", values=(prev_untranslated_text, prev_translated_text))
+        histableinsert(history_table)
 
     if log_translations and not ask:
         with open(translation_logfile, "a", encoding="utf-8") as f:
             if multilang:
                 f.write(f"{text_to_translate}\n\n")
             f.write(f"{translated_text}\n\n")
+    
+    translate_button.config(state=tk.NORMAL)
+    regenerate_button.config(state=tk.NORMAL)
 
 def num_tokens_from_messages(messages):
-    # Temporarily using tiktoken
-    # because i can't find Anthropic's
-    # token counter on the docs
     encoding = tiktoken.encoding_for_model("gpt-4-0314")
     tokens_per_message = 3
     tokens_per_name = 1
@@ -264,7 +258,7 @@ def translation_worker():
                 translated_dict.move_to_end(text_to_translate)
                 update_display(translated_textbox, translated_text)
             else:
-                translate_text(translated_textbox, prompt_textbox, untranslated_textbox, history, streaming)
+                start_translating()
                 
         time.sleep(1)
 
@@ -630,7 +624,7 @@ def set_api():
     api_window.resizable(False, False)
 
     def save_api_settings():
-        global model
+        global model, anth_api_key
         anth_api_key = api_key.get()
         model = model_var.get()
         
@@ -891,12 +885,31 @@ def load_dict(filename="dictionary.json"):
             return json.load(f)
     return []
 
-def history_window():
+def histableinsert(history_table):
+    prev_untranslated_text = ""
+    prev_translated_text = ""
+    for i, item in enumerate(history):
+        if item["role"] == "Human":
+            untranslated_text = item["content"]
+            if prev_untranslated_text:
+                history_table.insert("", "end", values=(prev_untranslated_text, prev_translated_text))
+            prev_untranslated_text = untranslated_text
+        else:
+            translated_text = item["content"]
+            prev_translated_text = translated_text 
+
+    history_table.insert("", "end", values=(prev_untranslated_text, prev_translated_text)) 
+
+def history_window():   #TODO: Bind Ctrl-z for History Table
     global history_window_open, history_table
     history_window_open = True
+    selected_item = None
+    #old_history = history
     
-    def save_history(history_table):
+    def save_history(history_table, closing=False):
         global history, history_window_open
+        if selected_item:
+            update_history(history_table)
         history = []
         for item in history_table.get_children():
             untranslated_text, translated_text = history_table.item(item)["values"]
@@ -905,36 +918,72 @@ def history_window():
 
         with open("chat_history.json", "w", encoding="utf-8") as json_file:
             json.dump(history, json_file, ensure_ascii=False)
-        history_window_open = False
-        history_window.destroy()
+        # Move this here?
+        # updated_label.config(text=f"Saved", foreground="green")
+        if closing:
+            history_window_open = False
+            history_window.destroy()
+
+    #def cancel_history(history_table):
+    #    global history, history_window_open
+    #    if old_history != history:
+    #        if messagebox.askokcancel("Undo Changes", "Are you sure you want to undo all changes and close the window?"):
+    #            history = old_history
+    #            with open("chat_history.json", "w", encoding="utf-8") as json_file:
+    #                json.dump(history, json_file, ensure_ascii=False)
+    #            history_window_open = False
+    #            history_window.destroy()
 
     def history_selection(history_table, raw_text, translation_box):
-        selected_item = history_table.selection()
-        if selected_item:
-           untranslated_text, translated_text = history_table.item(selected_item[0])["values"]
-           raw_text.config(state=tk.NORMAL)
-           raw_text.delete(1.0, tk.END)
-           raw_text.insert(1.0, untranslated_text)
-           raw_text.config(state=tk.DISABLED)
-           translation_box.config(state=tk.NORMAL)
-           translation_box.delete(1.0, tk.END)
-           translation_box.insert(1.0, translated_text)
-           translation_box.config(state=tk.DISABLED)
+        nonlocal selected_item
+        if selected_item != history_table.selection():
+            selected_item = history_table.selection()
+            if selected_item:
+                untranslated_text, translated_text = history_table.item(selected_item[0])["values"]
+                raw_text.config(state=tk.NORMAL)
+                raw_text.delete(1.0, tk.END)
+                raw_text.insert(1.0, untranslated_text)
+                translation_box.config(state=tk.NORMAL)
+                translation_box.delete(1.0, tk.END)
+                translation_box.insert(1.0, translated_text)
+                if updated_label.cget("text") == "Editing...":
+                    updated_label.config(text=f"Changes Unsaved", foreground="red")
+                elif not updated_label.cget("text") == "Changes Unsaved" and not updated_label.cget("text") == "Saved":
+                    updated_label.config(text=f"")
 
     def delete_history(history_table, event=None):
         selected_items = history_table.selection()
         for item in selected_items:
             history_table.delete(item)
     
-    def on_history_close(): 
+    def on_history_close():
         global history_window_open
-        history_window_open = False
-        history_window.destroy()
+        if updated_label.cget("text") == "Editing...":
+            if messagebox.askokcancel("Unsaved Changes", "You may have unsaved changes. Are you sure you want to close the window?"):
+                history_window_open = False
+                history_window.destroy()
+        else:
+            history_window_open = False
+            history_window.destroy()
+
+    def update_history(history_table):
+        selected_item = history_table.selection()
+        if selected_item:
+            original_text = raw_text.get(1.0, tk.END).strip()
+            transl_text = translation_box.get(1.0, tk.END).strip()
+            if original_text and transl_text:
+                history_table.item(selected_item[0], values=(original_text, transl_text))
+                updated_label.config(text=f"Saved", foreground="green")
+
+    def on_key_press(event):
+        if raw_text.cget("state") == tk.NORMAL:
+            updated_label.config(text=f"Editing...", foreground="Blue")
 
     history_window = tk.Toplevel(root)
     history_window.transient(root)
     history_window.title("History")
-    history_window.geometry("600x500")
+    history_window.geometry("600x600")
+    history_window.config(bg='white')
     history_window.iconbitmap(icon_path)
     
     main_frame = ttk.Frame(history_window)
@@ -953,42 +1002,43 @@ def history_window():
         history_table.heading(col, text=col)
         history_table.column(col, stretch=True, anchor="center")
     
-    prev_untranslated_text = ""
-    prev_translated_text = ""
-    for i, item in enumerate(history):
-        if item["role"] == "Human":
-            untranslated_text = item["content"]
-            if prev_untranslated_text:
-                history_table.insert("", "end", values=(prev_untranslated_text, prev_translated_text))
-            prev_untranslated_text = untranslated_text
-        else:
-            translated_text = item["content"]
-            prev_translated_text = translated_text 
-
-    history_table.insert("", "end", values=(prev_untranslated_text, prev_translated_text)) 
+    histableinsert(history_table)
         
     scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=history_table.yview)
     scrollbar.pack(side="right", fill="y")
 
     history_table.configure(yscrollcommand=scrollbar.set)
     history_table.pack(side="left", fill="both", expand=True)
-    
-    raw_text = tk.Text(history_window, wrap="word", width=64, height=5, font=sub_window_font, state=tk.DISABLED)
+
+    raw_frame = ttk.LabelFrame(history_window, text="Raw Text")
+    raw_frame.pack(pady=10, padx=10, fill="x")
+    raw_text = TextUndoRedo(raw_frame, wrap="word", width=64, height=5, font=sub_window_font, state=tk.DISABLED)
+    raw_text.bind("<Key>", on_key_press)
     raw_text.pack()
-    
-    translation_box = tk.Text(history_window, wrap="word", width=64, height=5, font=sub_window_font, state=tk.DISABLED)
+
+    transl_frame = ttk.LabelFrame(history_window, text="Translations")
+    transl_frame.pack(pady=10, padx=10, fill="x")    
+    translation_box = TextUndoRedo(transl_frame, wrap="word", width=64, height=5, font=sub_window_font, state=tk.DISABLED)
+    translation_box.bind("<Key>", on_key_press)
     translation_box.pack()
 
-    his_button_frame = tk.Frame(history_window)
+    his_button_frame = ttk.Frame(history_window)
     his_button_frame.pack(pady=10, padx=10, fill="x")
     
     delete_button = ttk.Button(his_button_frame, text="Delete", command=lambda: delete_history(history_table))
     delete_button.pack(side="left", padx=5)
     
+    upd_history = ttk.Button(his_button_frame, text="Save", command=lambda: save_history(history_table))
+    upd_history.pack(side="left", padx=5)
+    
+    updated_label = ttk.Label(his_button_frame, text="")
+    updated_label.pack(side="left", padx=5)
+    
+    history_window.bind("<Control-s>", lambda event: save_history(history_table))
     history_window.protocol("WM_DELETE_WINDOW", on_history_close)
-    save_button = ttk.Button(his_button_frame, text="Save", command=lambda: save_history(history_table))
+    save_button = ttk.Button(his_button_frame, text="Save and Close", command=lambda: save_history(history_table, closing=True))
     save_button.pack(side="right", padx=5)
-    cancel_button = ttk.Button(his_button_frame, text="Cancel", command=on_history_close)
+    cancel_button = ttk.Button(his_button_frame, text="Close", command=on_history_close)
     cancel_button.pack(side="right", padx=5)
 
     history_window.resizable(False, False)
@@ -1003,21 +1053,21 @@ def load_history():
     return loaded_history
 
 def create_buttons_window():
-    global buttons_window, apply_pre, apply_suf, ask_win, ask_win_open
+    global buttons_window, apply_pre, apply_suf, ask_win, ask_win_open, translate_button, regenerate_button
     
     buttons_window = tk.Toplevel(root)
     buttons_window.title("Buttons")
     buttons_window.iconbitmap(icon_path)
     
-    def regenerate_text():
+    def generate_text(regen=False):
         global history
-        if len(history) == 2:
+        if len(history) == 1 and regen:
             history.pop()
-        else:
+        elif len(history) > 1 and regen:
             history.pop()
             history.pop()
-        translate_text(translated_textbox, prompt_textbox, untranslated_textbox, history, streaming)
-    
+        threading.Thread(target=start_translating).start()
+        
     def toggle_auto_paste():
         global auto_paste
         auto_paste = not auto_paste
@@ -1071,9 +1121,9 @@ def create_buttons_window():
             apsuf()
         apply_two_button.config(relief=tk.SUNKEN if apply_suf and apply_pre else tk.RAISED)
 
-    translate_button = tk.Button(buttons_window, text="Translate", command=lambda: threading.Thread(target=translate_text, args=(translated_textbox, prompt_textbox, untranslated_textbox, history, streaming)).start(), fg="white", bg="grey")
+    translate_button = tk.Button(buttons_window, text="Translate", command=lambda: generate_text(), fg="white", bg="grey")
     translate_button.grid(row=0, column=1)
-    regenerate_button = tk.Button(buttons_window, text="Regenerate", command=lambda: threading.Thread(target=regenerate_text).start(), fg="white", bg="grey")
+    regenerate_button = tk.Button(buttons_window, text="Regenerate", command=lambda: generate_text(True), fg="white", bg="grey")
     regenerate_button.grid(row=0, column=2)
     ask_button = tk.Button(buttons_window, text="Ask", command=lambda: ask_window() if not ask_win_open else ask_win.deiconify(), fg="white", bg="grey")
     ask_button.grid(row=0, column=3)
@@ -1219,7 +1269,7 @@ def ask_window():
     input_frame = tk.LabelFrame(ask_win, text="System Prompt")
     input_frame.pack(pady=10, padx=10, fill="x")
     
-    asksysprompt = f"You are an AI translator assistant. You will help translate text to English while trying to keep the emotions, dialects, and meanings from the original text and convey them in the translation as much as possible. Do not make them sound bland like a robot."
+    asksysprompt = f"Human: You are an AI translator assistant. You will help translate text to English while trying to keep the emotions, dialects, and meanings from the original text and convey them in the translation as much as possible. Do not make them sound bland like a robot.\n\nAssistant: I Understand, please give me the text you want to translate."
     ask_system = EntryEx(input_frame, width=40, height=2, font=sub_window_font)
     ask_system.insert(tk.END, asksysprompt)
     ask_system.grid(row=0, column=1, padx=5, pady=5)
@@ -1236,10 +1286,19 @@ def ask_window():
     answer_text = EntryEx(answer_frame, height=5, width=40, font=sub_window_font)
     answer_text.config(state=tk.DISABLED)
     answer_text.grid(row=0, column=1, padx=5, pady=5)
+    
+    def start_ask():
+        nonlocal asking_button
+        if ask_prompt.get(1.0, tk.END).strip() != '':
+            try:
+                asking_button.config(state=tk.DISABLED)
+                translate_text(answer_text, ask_system, ask_prompt, ask_history, streaming, True)
+                asking_button.config(state=tk.NORMAL)
+            except Exception as e:
+                root.after(0, create_error_window, f"{e}")
+                asking_button.config(state=tk.NORMAL)
 
-    asking_button = ttk.Button(ask_win, text="Ask", 
-        command=lambda: threading.Thread(target=translate_text, args=(answer_text, ask_system, ask_prompt, ask_history, streaming, True)).start() if ask_prompt.get(1.0, tk.END).strip() != "" else None
-    )
+    asking_button = ttk.Button(ask_win, text="Ask", command=lambda: threading.Thread(target=start_ask).start())
     asking_button.pack(side="right", padx=5)
 
     cancel_button = ttk.Button(ask_win, text="Cancel", command=lambda: ask_win.withdraw())
@@ -1305,6 +1364,40 @@ class EntryEx(tk.Text):
     def popup_paste(self):
         self.event_generate("<<Paste>>")
 
+class TextUndoRedo(tk.Text):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.config(wrap="word", undo=True, autoseparators=True, maxundo=-1)
+        self.menu = tk.Menu(self, tearoff=False)
+        self.menu.add_command(label="Undo", command=self.popup_undo, accelerator="Ctrl-Z")
+        self.menu.add_command(label="Redo", command=self.popup_redo, accelerator="Ctrl-Y")
+        self.menu.add_separator()
+        self.menu.add_command(label="Copy", command=self.popup_copy, accelerator="Ctrl-C")
+        self.menu.add_command(label="Cut", command=self.popup_cut, accelerator="Ctrl-X")
+        self.menu.add_command(label="Paste", command=self.popup_paste, accelerator="Ctrl-V")
+        self.bind("<Button-3>", self.display_popup)
+
+    def display_popup(self, event):
+        self.menu.post(event.x_root, event.y_root)
+        
+    def popup_undo(self):
+        self.event_generate("<<Undo>>")
+        
+    def popup_redo(self):
+        self.event_generate("<<Redo>>")
+
+    def popup_copy(self):
+        self.event_generate("<<Copy>>")
+        update_old_clipboard()
+
+    def popup_cut(self):
+        self.event_generate("<<Cut>>")
+        update_old_clipboard()
+
+    def popup_paste(self):
+        self.event_generate("<<Paste>>")
+
 root = tk.Tk()
 root.title("Claude Translator")
 root.geometry("400x200")
@@ -1340,7 +1433,7 @@ temperature = float(settings_data.get("temperature", 0.5))
 context_size = int(settings_data.get("context_size", 3000))
 max_response_length = int(settings_data.get("max_response_length", 1000))
 top_k = float(settings_data.get("top_k", -1))
-top_p = float(settings_data.get("top_p", -1))
+top_p = float(settings_data.get("top_p", 1))
 streaming = settings_data.get("streaming", "False").lower() == "true"
 
 prompt_logfile, prompt_text = check_prompt_file(prompt_logfile)
